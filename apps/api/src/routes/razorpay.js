@@ -1,0 +1,439 @@
+import Razorpay from 'razorpay';
+import crypto from 'crypto';
+import pocketbaseClient from '../utils/pocketbaseClient.js';
+import { createShipmentCore } from './delhivery.js';
+import logger from '../utils/logger.js';
+
+const KEY_ID = process.env.RAZORPAY_KEY_ID;
+const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const HOSTINGER_ECOMMERCE_API_URL = 'https://api-ecommerce.hostinger.com';
+const HOSTINGER_STORE_ID = 'store_01KYAEW73P06SE72FAQEVDVSZQ';
+
+// ---- Business rules (enforced server-side, cannot be bypassed by the client) ----
+const MOQ = 100; // Minimum Order Quantity per product line
+const PACKAGING_DELHI_PAISE = 0; // ₹5 per piece within Delhi 0 for test
+const PACKAGING_OUTSIDE_PAISE = 1500; // ₹15 per piece outside Delhi
+
+function getRazorpay() {
+  if (!KEY_ID || !KEY_SECRET) throw new Error('RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing in apps/api/.env');
+  return new Razorpay({ key_id: KEY_ID, key_secret: KEY_SECRET });
+}
+
+function getRecordValue(record, key, fallback = '') {
+  if (!record) return fallback;
+  if (typeof record.get === 'function') return record.get(key);
+  return record[key] ?? fallback;
+}
+
+function generateOrderNumber() {
+  const d = new Date();
+  const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `IH-${ymd}-${rand}`;
+}
+
+function normalizePhone(value) {
+  const cleaned = String(value ?? '').replace(/\D/g, '');
+  return cleaned.length >= 10 ? cleaned : '';
+}
+
+function normalizePostalCode(value) {
+  const cleaned = String(value ?? '').replace(/\D/g, '');
+  return cleaned || '';
+}
+
+export function buildHostingerOrderPayload(orderRecord = {}) {
+  const items = Array.isArray(orderRecord.items_json) ? orderRecord.items_json : [];
+  const normalizedItems = items.map((item, index) => {
+    const quantity = Number(item?.quantity ?? 1);
+    const unitPriceInCents = Number(item?.price_in_cents ?? item?.unit_price_in_cents ?? item?.amount_in_cents ?? 0);
+    return {
+      id: item?.product_id || item?.variant_id || `line_${index + 1}`,
+      product_id: item?.product_id || '',
+      variant_id: item?.variant_id || '',
+      sku: item?.sku || '',
+      title: item?.title || item?.product_title || `Item ${index + 1}`,
+      quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+      price_in_cents: Number.isFinite(unitPriceInCents) ? unitPriceInCents : 0,
+      amount_in_cents: Number.isFinite(unitPriceInCents) ? unitPriceInCents : 0,
+      unit_price: Number.isFinite(unitPriceInCents) ? Number((unitPriceInCents / 100).toFixed(2)) : 0,
+    };
+  });
+
+  const amountTotal = Number((Number(orderRecord.amount_in_paise || 0) / 100).toFixed(2));
+
+  return {
+    order_number: orderRecord.order_number || orderRecord.razorpay_order_id || `hostinger_${Date.now()}`,
+    status: String(orderRecord.status || 'paid').toLowerCase(),
+    currency: 'INR',
+    amount_total: Number.isFinite(amountTotal) ? amountTotal : 0,
+    customer: {
+      name: orderRecord.customer_name || '',
+      email: orderRecord.customer_email || '',
+      phone: normalizePhone(orderRecord.customer_phone || ''),
+    },
+    billing_address: {
+      name: orderRecord.customer_name || '',
+      address: orderRecord.billing_address || orderRecord.shipping_address || '',
+      city: orderRecord.shipping_city || '',
+      state: orderRecord.shipping_state || '',
+      postcode: normalizePostalCode(orderRecord.shipping_pincode || ''),
+      country: 'IN',
+    },
+    shipping_address: {
+      name: orderRecord.customer_name || '',
+      address: orderRecord.shipping_address || '',
+      city: orderRecord.shipping_city || '',
+      state: orderRecord.shipping_state || '',
+      postcode: normalizePostalCode(orderRecord.shipping_pincode || ''),
+      country: 'IN',
+      phone: normalizePhone(orderRecord.customer_phone || ''),
+    },
+    items: normalizedItems,
+    products: normalizedItems,
+    line_items: normalizedItems,
+    notes: orderRecord.order_notes || '',
+    gst_number: orderRecord.gst_number || '',
+    payment: {
+      provider: 'razorpay',
+      provider_order_id: orderRecord.razorpay_order_id || '',
+      provider_payment_id: orderRecord.razorpay_payment_id || '',
+    },
+    metadata: {
+      source: 'custom_checkout',
+      pocketbase_order_id: orderRecord.id || '',
+      razorpay_order_id: orderRecord.razorpay_order_id || '',
+    },
+  };
+}
+
+async function syncPaidOrderToHostinger(orderRecord) {
+  const payloadVariants = [
+    buildHostingerOrderPayload(orderRecord),
+    {
+      ...buildHostingerOrderPayload(orderRecord),
+      order: {
+        number: orderRecord.order_number || orderRecord.razorpay_order_id || `hostinger_${Date.now()}`,
+        status: String(orderRecord.status || 'paid').toLowerCase(),
+        total: Number((Number(orderRecord.amount_in_paise || 0) / 100).toFixed(2)),
+        currency: 'INR',
+      },
+      customer: {
+        name: orderRecord.customer_name || '',
+        email: orderRecord.customer_email || '',
+        phone: normalizePhone(orderRecord.customer_phone || ''),
+      },
+      items: (Array.isArray(orderRecord.items_json) ? orderRecord.items_json : []).map((item) => ({
+        product_id: item?.product_id || item?.variant_id || '',
+        variant_id: item?.variant_id || '',
+        title: item?.title || item?.product_title || '',
+        quantity: Number(item?.quantity ?? 1),
+        price_in_cents: Number(item?.price_in_cents ?? 0),
+      })),
+    },
+  ];
+
+  let lastFailure;
+
+  for (const payload of payloadVariants) {
+    try {
+      const response = await fetch(`${HOSTINGER_ECOMMERCE_API_URL}/store/${HOSTINGER_STORE_ID}/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        lastFailure = new Error(`Hostinger order sync failed with HTTP ${response.status}: ${text || response.statusText}`);
+        if (response.status >= 500 || response.status === 429) {
+          throw lastFailure;
+        }
+        continue;
+      }
+
+      const responseData = await response.json().catch(() => ({}));
+      const hostingerOrderId =
+        responseData?.id
+        || responseData?.order_id
+        || responseData?.order?.id
+        || responseData?.data?.id
+        || responseData?.data?.order_id
+        || responseData?.order?.order_id
+        || responseData?.order?.number
+        || null;
+
+      return {
+        ok: true,
+        hostinger_order_id: hostingerOrderId,
+        data: responseData,
+      };
+    } catch (err) {
+      lastFailure = err;
+    }
+  }
+
+  throw lastFailure || new Error('Hostinger order sync failed');
+}
+
+// Determine whether the DELIVERY (shipping) address is inside Delhi.
+// Uses shipping state, city and pincode — never the billing address alone.
+function isDelhiDelivery(customer) {
+  const state = String(customer?.state || '').toLowerCase().trim();
+  const city = String(customer?.city || '').toLowerCase().trim();
+  const pincode = String(customer?.pincode || '').replace(/\D/g, '');
+  if (state === 'delhi' || state === 'new delhi') return true;
+  if (city.includes('delhi')) return true;
+  if (pincode.startsWith('110')) return true;
+  return false;
+}
+
+// Recompute the authoritative order totals from the submitted items + delivery
+// location. The client sends these too, but the server is the source of truth
+// so a tampered request cannot bypass MOQ, packaging, or pricing.
+function recomputeTotals(items, customer, deliveryChargesPaise) {
+  let totalQuantity = 0;
+  let productAmountPaise = 0;
+  for (const it of items || []) {
+    const qty = Number(it.quantity || 0);
+    const price = Number(it.price_in_cents || 0);
+    totalQuantity += qty;
+    productAmountPaise += qty * price;
+  }
+  const packagingPaise =
+    totalQuantity * (isDelhiDelivery(customer) ? PACKAGING_DELHI_PAISE : PACKAGING_OUTSIDE_PAISE);
+  const delivery = Number.isFinite(Number(deliveryChargesPaise)) && Number(deliveryChargesPaise) >= 0
+    ? Number(deliveryChargesPaise)
+    : 0;
+  const grandTotalPaise = productAmountPaise + packagingPaise + delivery;
+  return { totalQuantity, productAmountPaise, packagingPaise, deliveryChargesPaise: delivery, grandTotalPaise };
+}
+
+// POST /razorpay/create-order
+export async function createOrder(req, res) {
+  const {
+    amount_in_paise,
+    customer,
+    items,
+    delivery_charges_in_paise,
+    owner_id,
+  } = req.body ?? {};
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(422).json({ error: 'Your cart is empty.' });
+  }
+
+  // ---- Server-side MOQ enforcement: every product line must be >= MOQ ----
+  const belowMoq = items.filter((it) => Number(it.quantity || 0) < MOQ);
+  if (belowMoq.length > 0) {
+    return res.status(422).json({
+      error: `Minimum order quantity is ${MOQ} pieces per product. Please increase the quantity of ${belowMoq[0].title || belowMoq[0].product_title || 'the product'} to at least ${MOQ} pieces.`,
+    });
+  }
+
+  // ---- Authoritative totals (server is source of truth) ----
+  const totals = recomputeTotals(items, customer, delivery_charges_in_paise);
+
+  const rz = getRazorpay();
+  const rzOrder = await rz.orders.create({
+    amount: totals.grandTotalPaise,
+    currency: 'INR',
+    receipt: `ih_${Date.now()}`,
+    payment_capture: 1,
+  });
+
+  const orderNumber = generateOrderNumber();
+
+  // Persist pending order in PocketBase. This record is created BEFORE payment,
+  // so it always appears in the admin backend (as "pending") even if payment
+  // verification were to fail later. verify-payment flips it to "paid".
+  const pb = pocketbaseClient;
+  await pb.collection('orders').create({
+    order_number: orderNumber,
+    razorpay_order_id: rzOrder.id,
+    status: 'pending',
+    customer_name: customer?.name || '',
+    customer_email: customer?.email || '',
+    customer_phone: customer?.phone || '',
+    shipping_address: customer?.address || '',
+    shipping_city: customer?.city || '',
+    shipping_state: customer?.state || '',
+    shipping_pincode: customer?.pincode || '',
+    billing_address: customer?.address || '',
+    gst_number: customer?.gst || '',
+    eway_bill: String(customer?.eway_bill || '').replace(/\D/g, '').slice(0, 12),
+    order_notes: customer?.notes || '',
+    product_amount_in_paise: totals.productAmountPaise,
+    packaging_charges_in_paise: totals.packagingPaise,
+    delivery_charges_in_paise: totals.deliveryChargesPaise,
+    total_quantity: totals.totalQuantity,
+    amount_in_paise: totals.grandTotalPaise,
+    items_json: items || [],
+    owner: owner_id || '',
+  });
+
+  res.json({
+    order_id: rzOrder.id,
+    order_number: orderNumber,
+    amount: rzOrder.amount,
+    currency: rzOrder.currency,
+    key_id: KEY_ID,
+  });
+}
+
+// POST /razorpay/verify-payment
+// Idempotent: a successful payment creates/updates exactly one order, no matter
+// how many times the callback fires or the confirmation page is refreshed.
+export async function verifyPayment(req, res) {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body ?? {};
+
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(422).json({ error: 'Missing payment verification fields' });
+  }
+
+  // Verify signature
+  const expected = crypto
+    .createHmac('sha256', KEY_SECRET)
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest('hex');
+
+  const pb = pocketbaseClient;
+
+  if (expected !== razorpay_signature) {
+    // Signature mismatch → mark the matching order as failed (do not delete it).
+    try {
+      const records = await pb.collection('orders').getFullList({
+        filter: pb.filter('razorpay_order_id = {:razorpay_order_id}', { razorpay_order_id }),
+      });
+      if (records.length > 0) {
+        await pb.collection('orders').update(records[0].id, { status: 'failed' });
+      }
+    } catch (err) {
+      logger.error('Failed to mark order failed after signature mismatch', {
+        razorpay_order_id,
+        err: err?.message || err,
+      });
+    }
+
+    logger.warn('Payment signature verification failed', { razorpay_order_id });
+    return res.status(400).json({ error: 'Payment signature verification failed' });
+  }
+
+  // Fetch the payment from Razorpay to validate status and order linkage
+  let payment;
+  try {
+    const rz = getRazorpay();
+    payment = await rz.payments.fetch(razorpay_payment_id);
+  } catch (err) {
+    logger.error('Razorpay payment fetch failed', { razorpay_payment_id, err: err?.message || err });
+    return res.status(500).json({ error: 'Could not verify payment with Razorpay' });
+  }
+
+  if (String(payment?.status) !== 'captured') {
+    logger.warn('Payment not captured', { razorpay_payment_id, status: payment?.status });
+    return res.status(400).json({ error: 'Payment not captured', status: payment?.status });
+  }
+
+  if (String(payment?.order_id) !== String(razorpay_order_id)) {
+    logger.warn('Payment order_id mismatch', { razorpay_payment_id, payment_order_id: payment?.order_id });
+    return res.status(400).json({ error: 'Order id mismatch', payment_order_id: payment?.order_id });
+  }
+
+  // Find the pending order by its Razorpay order id.
+  let records;
+  try {
+    records = await pb.collection('orders').getFullList({
+      filter: pb.filter('razorpay_order_id = {:razorpay_order_id}', { razorpay_order_id }),
+    });
+  } catch (err) {
+    logger.error('PocketBase order lookup failed', { razorpay_order_id, err: err?.message || err });
+    return res.status(500).json({ error: 'Database query failed' });
+  }
+
+  if (records.length === 0) {
+    // No matching order — cannot mark a non-existent order paid.
+    return res.status(404).json({ error: 'Order not found for this payment.' });
+  }
+
+  const existing = records[0];
+  const existingStatus = String(getRecordValue(existing, 'status', ''));
+  const existingPaymentId = String(getRecordValue(existing, 'razorpay_payment_id', ''));
+
+  // IDEMPOTENCY: if this order is already verified as paid, just return success.
+  // A repeated callback / page refresh must not create a duplicate or overwrite.
+  if (existingStatus === 'paid' && existingPaymentId === razorpay_payment_id) {
+    return res.json({
+      success: true,
+      order_id: razorpay_order_id,
+      order_number: getRecordValue(existing, 'order_number', ''),
+      payment_id: razorpay_payment_id,
+      already_verified: true,
+      shipment_status: String(getRecordValue(existing, 'delhivery_request_status', 'pending') || 'pending'),
+    });
+  }
+
+  // Mark the order as paid with the verified payment id + signature.
+  let orderRecord;
+  try {
+    orderRecord = await pb.collection('orders').update(existing.id, {
+      razorpay_payment_id,
+      razorpay_signature,
+      status: 'paid',
+    });
+  } catch (err) {
+    logger.error('PocketBase order update failed', { id: existing.id, message: err?.message || err });
+    return res.status(500).json({ error: 'PocketBase update failed', detail: String(err?.message || err) });
+  }
+
+  let hostingerSync = null;
+  try {
+    const syncedRecord = await pb.collection('orders').getOne(existing.id);
+    hostingerSync = await syncPaidOrderToHostinger({
+      ...syncedRecord,
+      id: syncedRecord.id,
+      status: 'paid',
+      razorpay_payment_id,
+      razorpay_order_id,
+    });
+  } catch (err) {
+    logger.warn('Hostinger order sync failed after successful payment', {
+      order_id: existing.id,
+      razorpay_order_id,
+      razorpay_payment_id,
+      err: err?.message || err,
+    });
+  }
+
+  // After a verified payment, automatically create the Delhivery B2B shipment.
+  // This is intentionally non-fatal: the order must remain paid even when the
+  // courier returns a job_id without an LRN yet. Delhivery will continue polling
+  // in the background and update the order record asynchronously.
+  let shipmentResult = null;
+  try {
+    shipmentResult = await createShipmentCore(pb, existing.id);
+  } catch (err) {
+    logger.error('Delhivery auto-shipment failed for order', {
+      order_id: existing.id,
+      err: err?.message || err,
+    });
+    // Do not fail the payment verification flow; shipping can be retried later.
+  }
+
+  const shipmentStatus = String(
+    shipmentResult?.delhivery_request_status
+      || shipmentResult?.delhivery_status
+      || getRecordValue(existing, 'delhivery_request_status', 'pending')
+      || 'pending',
+  ).trim() || 'pending';
+
+  res.json({
+    success: true,
+    order_id: razorpay_order_id,
+    order_number: getRecordValue(orderRecord, 'order_number', getRecordValue(existing, 'order_number', '')),
+    payment_id: razorpay_payment_id,
+    shipment_status: shipmentStatus,
+    shipment_pending: ['pending_lrn', 'creating', 'pending'].includes(shipmentStatus),
+    hostinger_order_sync_status: hostingerSync?.ok ? 'synced' : 'failed',
+    ...(shipmentResult ? { shipment_error: shipmentResult.error, shipmentResult } : {}),
+  });
+}

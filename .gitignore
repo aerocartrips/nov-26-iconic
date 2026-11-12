@@ -1,0 +1,77 @@
+# =============================================================================
+# WHAT TO TRACK IN GIT (commit these)
+# =============================================================================
+#
+# Root
+#   - package.json, bun.lock, bunfig.toml, knip.json, .nvmrc, .version, .gitignore
+#
+# apps/web
+#   - Source: src/**, plugins/**, tools/**
+#   - Config: vite.config.js, tailwind.config.js, components.json, jsconfig.json, eslint.*
+#   - Entry/static: index.html, public/**
+#
+# apps/api
+#   - Source: src/**
+#   - Config: package.json, eslint.config.mjs
+#   - Env template only: .env.example (never commit real .env)
+#
+# apps/pocketbase
+#   - Schema & logic: pb_migrations/**, pb_hooks/**
+#   - Types & version: database-types.d.ts, .pocketbase-version, package.json
+#   - Generated types (when present): pb_data/types.d.ts
+#
+# Do NOT commit secrets, local databases, installs, or build output (see below).
+# =============================================================================
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs & debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Vite
+.vite/
+
+# ESLint
+.eslintcache
+
+# PocketBase
+apps/pocketbase/pocketbase
+apps/pocketbase/pocketbase.exe
+apps/pocketbase/pb_data/**
+!apps/pocketbase/pb_data/types.d.ts
+apps/pocketbase/pb_snapshots/
+
+# Archives & local exports
+*.tar.gz
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors (local settings only)
+.idea/
+*.swp
+*.swo
+*~
