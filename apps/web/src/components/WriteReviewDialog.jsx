@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Star, Loader2, CheckCircle2, Upload, X } from 'lucide-react';
-import pb from '@/lib/pocketbaseClient';
+import apiServerClient from '@/lib/apiServerClient';
 import { useAuth } from '@/contexts/AuthContext';
 import { REVIEW_CATEGORIES } from '@/lib/reviews';
 import { toast } from 'sonner';
@@ -98,15 +98,19 @@ const WriteReviewDialog = ({ open, onOpenChange }) => {
       fd.append('rating', String(rating));
       fd.append('review_text', form.review_text.trim());
       fd.append('consent', 'true');
-      fd.append('status', 'approved');
-      fd.append('verified_purchase', 'false');
-      fd.append('featured', 'false');
       if (user?.id) fd.append('owner', user.id);
       if (media) fd.append('media', media);
 
-      await pb.collection('reviews').create(fd);
+      const res = await apiServerClient.fetch('/reviews/submit', {
+        method: 'POST',
+        body: fd,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not submit your review.');
+      }
       setDone(true);
-      toast.success('Thank you! Your review has been published.');
+      toast.success('Thank you! Your review was submitted for approval.');
     } catch (err) {
       const msg =
         err?.response?.data?.review_text?.message ||
@@ -127,8 +131,8 @@ const WriteReviewDialog = ({ open, onOpenChange }) => {
             <CheckCircle2 className="mx-auto h-14 w-14 text-gold" />
             <h3 className="font-display text-2xl text-primary mt-5">Review Submitted</h3>
             <p className="text-muted-foreground mt-3 text-sm font-light leading-relaxed">
-              Thank you for sharing your experience. Your review has been
-              published and is now visible on our Reviews page.
+              Thank you for sharing your experience. We will publish your review
+              on our Reviews page once our team approves it.
             </p>
             <Button
               className="mt-7 rounded-full bg-primary text-primary-foreground hover:bg-[hsl(133_23%_33%)]"
@@ -142,8 +146,8 @@ const WriteReviewDialog = ({ open, onOpenChange }) => {
             <DialogHeader>
               <DialogTitle className="font-display text-2xl text-primary">Write a Review</DialogTitle>
               <DialogDescription className="text-muted-foreground">
-                Share your honest experience with ICONIC Handicraft. Your review
-                is published immediately on submission.
+                Share your honest experience with ICONIC Handicraft. Reviews are
+                moderated before they appear on the site.
               </DialogDescription>
             </DialogHeader>
 

@@ -5,17 +5,7 @@ import { Loader2, ChevronLeft, Package, MapPin, CreditCard, CheckCircle2 } from 
 import pb from '@/lib/pocketbaseClient';
 import apiServerClient from '@/lib/apiServerClient';
 
-const formatINR = (cents) => `\u20b9${((cents || 0) / 100).toFixed(2)}`;
-
-const STATUS_STYLES = {
-  pending: 'bg-amber-100 text-amber-800',
-  paid: 'bg-green-100 text-green-800',
-  processing: 'bg-blue-100 text-blue-800',
-  shipped: 'bg-indigo-100 text-indigo-800',
-  delivered: 'bg-green-200 text-green-900',
-  cancelled: 'bg-red-100 text-red-800',
-  failed: 'bg-red-100 text-red-800',
-};
+import { formatINR, ORDER_STATUS_STYLES } from '@/lib/orders';
 
 const OrderDetailPage = () => {
   const { orderId } = useParams();
@@ -98,7 +88,7 @@ const OrderDetailPage = () => {
                   {new Date(order.created).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                 </p>
               </div>
-              <span className={`text-xs uppercase tracking-wider px-3 py-1.5 rounded-full font-medium ${STATUS_STYLES[order.status] || 'bg-secondary text-muted-foreground'}`}>
+              <span className={`text-xs uppercase tracking-wider px-3 py-1.5 rounded-full font-medium ${ORDER_STATUS_STYLES[order.status] || 'bg-secondary text-muted-foreground'}`}>
                 {order.status}
               </span>
             </div>

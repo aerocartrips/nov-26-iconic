@@ -1,11 +1,12 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Helmet } from 'react-helmet';
-import { Navigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import {
-  Check, X, Star, BadgeCheck, Trash2, Edit3, Save, Loader2, ShieldCheck, Sparkles,
+  Check, X, BadgeCheck, Trash2, Edit3, Save, Loader2, ShieldCheck, Sparkles,
 } from 'lucide-react';
-import pb from '@/lib/pocketbaseClient';
-import { useAuth } from '@/contexts/AuthContext';
+import { useAdminAuth } from '@/contexts/AdminAuthContext';
+import { adminApiJson } from '@/lib/adminAuth';
+import AdminGate from '@/components/AdminGate';
 import StarRating from '@/components/StarRating';
 import { REVIEW_STATUS_LABELS } from '@/lib/reviews';
 import { toast } from 'sonner';
@@ -14,6 +15,8 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from '@/components/ui/tabs';
+
+const PER_PAGE = 50;
 
 const formatDate = (iso) => {
   if (!iso) return '';
@@ -25,105 +28,136 @@ const formatDate = (iso) => {
 };
 
 const AdminReviewsPage = () => {
-  const { user, loading: authLoading } = useAuth();
-  const isAdmin = user?.role === 'admin';
-
+  const { session, logout } = useAdminAuth();
   const [tab, setTab] = useState('pending');
   const [reviews, setReviews] = useState([]);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState('');
   const [verifyingId, setVerifyingId] = useState(null);
+  const loadSeq = useRef(0);
+  const totalItemsRef = useRef(0);
+  const pageRef = useRef(page);
+  pageRef.current = page;
 
-  const load = useCallback(async (status) => {
+  const onUnauthorized = useCallback(() => {
+    logout();
+    window.location.assign('/admin/login');
+  }, [logout]);
+
+  const load = useCallback(async (status, p) => {
+    if (!session) return;
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await pb.collection('reviews').getList(1, 50, {
-        filter: pb.filter('status = {:s}', { s: status }),
-        sort: '-created',
-      });
-      setReviews(res.items || []);
+      const data = await adminApiJson(
+        session,
+        `/admin/reviews?status=${encodeURIComponent(status)}&page=${p}&perPage=${PER_PAGE}`,
+        {},
+        onUnauthorized,
+      );
+      if (seq !== loadSeq.current) return;
+      const items = data.items || [];
+      const total = Number.isFinite(Number(data.totalItems))
+        ? Number(data.totalItems)
+        : items.length;
+      const pages = Math.max(1, Number(data.totalPages) || 1);
+      totalItemsRef.current = total;
+      setReviews(items);
+      setTotalPages(pages);
+      setPage(Math.min(Number(data.page) || p, pages));
     } catch (err) {
+      if (seq !== loadSeq.current) return;
+      if (err?.name === 'AdminUnauthorizedError') return;
       toast.error('Could not load reviews. ' + (err?.message || ''));
       setReviews([]);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
-  }, []);
+  }, [session, onUnauthorized]);
 
   useEffect(() => {
-    if (isAdmin) load(tab);
-  }, [tab, isAdmin, load]);
+    load(tab, page);
+  }, [tab, page, load]);
 
-  if (authLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-      </div>
-    );
-  }
-  if (!user) return <Navigate to="/login" replace state={{ from: '/admin/reviews' }} />;
-  if (!isAdmin) {
-    return (
-      <div className="pt-32 pb-24 text-center px-6">
-        <ShieldCheck className="mx-auto h-12 w-12 text-muted-foreground" />
-        <h1 className="font-display text-2xl text-primary mt-5">Admins Only</h1>
-        <p className="text-muted-foreground mt-2">
-          You need an administrator account to access the review moderation panel.
-        </p>
-      </div>
-    );
-  }
+  const mutate = async (path, options) => {
+    const data = await adminApiJson(session, path, options, onUnauthorized);
+    return data;
+  };
 
   const update = async (id, patch) => {
     try {
-      const updated = await pb.collection('reviews').update(id, patch);
+      const updated = await mutate(`/admin/reviews/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
       setReviews((prev) => prev.map((r) => (r.id === id ? updated : r)));
       return updated;
     } catch (err) {
+      if (err?.name === 'AdminUnauthorizedError') throw err;
       toast.error('Update failed. ' + (err?.message || ''));
       throw err;
     }
   };
 
-  const approve = (id) => update(id, { status: 'approved' }).then(() => toast.success('Review approved.'));
-  const reject = (id) => update(id, { status: 'rejected' }).then(() => toast.success('Review rejected.'));
-  const toggleFeature = (r) =>
-    update(r.id, { featured: !r.featured }).then(() =>
-      toast.success(!r.featured ? 'Marked as featured.' : 'Removed from featured.'),
-    );
+  const dropFromTab = (id) => {
+    const nextCount = Math.max(0, totalItemsRef.current - 1);
+    const pages = Math.max(1, Math.ceil(nextCount / PER_PAGE));
+    const nextPage = Math.min(pageRef.current, pages);
+    totalItemsRef.current = nextCount;
+    setTotalPages(pages);
+    if (nextPage !== pageRef.current) {
+      setLoading(true);
+      setPage(nextPage);
+      return;
+    }
+    setReviews((prev) => prev.filter((r) => r.id !== id));
+  };
+  const approve = async (id) => {
+    try {
+      await update(id, { status: 'approved' });
+      dropFromTab(id);
+      toast.success('Review approved — now visible on the site.');
+    } catch { /* update() already toasted */ }
+  };
+  const reject = async (id) => {
+    try {
+      await update(id, { status: 'rejected' });
+      dropFromTab(id);
+      toast.success('Review rejected.');
+    } catch { /* update() already toasted */ }
+  };
+  const toggleFeature = async (r) => {
+    try {
+      await update(r.id, { featured: !r.featured });
+      toast.success(!r.featured ? 'Marked as featured.' : 'Removed from featured.');
+    } catch { /* update() already toasted */ }
+  };
+
   const remove = async (id) => {
     if (!window.confirm('Permanently delete this review? This cannot be undone.')) return;
     try {
-      await pb.collection('reviews').delete(id);
-      setReviews((prev) => prev.filter((r) => r.id !== id));
+      await mutate(`/admin/reviews/${id}`, { method: 'DELETE' });
+      dropFromTab(id);
       toast.success('Review deleted.');
     } catch (err) {
+      if (err?.name === 'AdminUnauthorizedError') return;
       toast.error('Delete failed. ' + (err?.message || ''));
     }
   };
 
   const verifyPurchase = async (review) => {
-    if (!review.order_number) {
-      toast.error('This review has no order number to verify.');
-      return;
-    }
     setVerifyingId(review.id);
     try {
-      const order = await pb.collection('orders').getFirstListItem(
-        pb.filter('order_number = {:n}', { n: review.order_number }),
-      );
-      if (String(order.status) === 'paid') {
-        await update(review.id, { verified_purchase: true });
-        toast.success('Purchase verified — order found and paid.');
-      } else {
-        toast.error(`Order found but status is "${order.status}". Not marked verified.`);
-      }
+      const updated = await mutate(`/admin/reviews/${review.id}/verify`, { method: 'POST' });
+      setReviews((prev) => prev.map((r) => (r.id === review.id ? updated : r)));
+      toast.success('Purchase verified.');
     } catch (err) {
-      const msg = err?.status === 404
-        ? 'No matching order found for this order number.'
-        : 'Could not verify order. ' + (err?.message || '');
-      toast.error(msg);
+      if (err?.name === 'AdminUnauthorizedError') return;
+      toast.error(err?.message || 'Could not verify purchase.');
     } finally {
       setVerifyingId(null);
     }
@@ -140,75 +174,106 @@ const AdminReviewsPage = () => {
   };
 
   return (
-    <>
-      <Helmet>
-        <title>Review Moderation — Iconic Handicraft Admin</title>
-      </Helmet>
-      <section className="pt-28 pb-24 min-h-screen bg-[hsl(var(--background))]">
-        <div className="mx-auto max-w-[90rem] px-6">
-          <div className="mb-8">
-            <span className="text-gold tracking-[0.35em] uppercase text-xs">Admin</span>
-            <h1 className="font-display text-primary text-3xl md:text-4xl mt-3">Review Moderation</h1>
-            <p className="text-muted-foreground mt-2 text-sm font-light">
-              Reviews are published automatically when submitted. Use this panel
-              to feature, verify purchases, reject spam, edit, or remove reviews.
-            </p>
-          </div>
-
-          <Tabs value={tab} onValueChange={setTab}>
-            <TabsList className="bg-white border border-border">
-              <TabsTrigger value="pending">Pending</TabsTrigger>
-              <TabsTrigger value="approved">Approved</TabsTrigger>
-              <TabsTrigger value="rejected">Rejected</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value={tab} className="mt-6">
-              {loading ? (
-                <div className="flex justify-center py-20">
-                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                </div>
-              ) : reviews.length === 0 ? (
-                <p className="text-center text-muted-foreground py-20 font-light">
-                  No {REVIEW_STATUS_LABELS[tab]?.toLowerCase()} reviews.
+    <AdminGate>
+      <>
+        <Helmet>
+          <title>Review Moderation — Admin</title>
+          <meta name="robots" content="noindex" />
+        </Helmet>
+        <section className="pt-28 pb-24 min-h-screen bg-[hsl(var(--background))]">
+          <div className="mx-auto max-w-[90rem] px-6">
+            <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
+              <div>
+                <span className="text-gold tracking-[0.35em] uppercase text-xs">Administration</span>
+                <h1 className="font-display text-primary text-3xl md:text-4xl mt-3">Review Moderation</h1>
+                <p className="text-muted-foreground mt-2 text-sm font-light">
+                  New submissions stay pending until you approve them. Only approved reviews appear on the website.
                 </p>
-              ) : (
-                <div className="grid gap-5">
-                  {reviews.map((r) => (
-                    <ReviewAdminRow
-                      key={r.id}
-                      review={r}
-                      editing={editingId === r.id}
-                      editText={editText}
-                      onEditText={setEditText}
-                      onStartEdit={() => startEdit(r)}
-                      onCancelEdit={cancelEdit}
-                      onSaveEdit={() => saveEdit(r.id)}
-                      onApprove={() => approve(r.id)}
-                      onReject={() => reject(r.id)}
-                      onFeature={() => toggleFeature(r)}
-                      onVerify={() => verifyPurchase(r)}
-                      onDelete={() => remove(r.id)}
-                      verifying={verifyingId === r.id}
-                    />
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-          </Tabs>
-        </div>
-      </section>
-    </>
+              </div>
+              <Link
+                to="/admin"
+                className="inline-flex items-center gap-2 text-sm px-4 py-2 rounded-full border border-border hover:border-gold transition-colors"
+              >
+                All orders
+              </Link>
+            </div>
+
+            <Tabs value={tab} onValueChange={(next) => { setTab(next); setPage(1); }}>
+              <TabsList className="bg-white border border-border">
+                <TabsTrigger value="pending">Pending</TabsTrigger>
+                <TabsTrigger value="approved">Approved</TabsTrigger>
+                <TabsTrigger value="rejected">Rejected</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value={tab} className="mt-6">
+                {loading ? (
+                  <div className="flex justify-center py-20">
+                    <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                  </div>
+                ) : reviews.length === 0 ? (
+                  <p className="text-center text-muted-foreground py-20 font-light">
+                    No {REVIEW_STATUS_LABELS[tab]?.toLowerCase()} reviews.
+                  </p>
+                ) : (
+                  <div className="grid gap-5">
+                    {reviews.map((r) => (
+                      <ReviewAdminRow
+                        key={r.id}
+                        review={r}
+                        editing={editingId === r.id}
+                        editText={editText}
+                        onEditText={setEditText}
+                        onStartEdit={() => startEdit(r)}
+                        onCancelEdit={cancelEdit}
+                        onSaveEdit={() => saveEdit(r.id)}
+                        onApprove={() => approve(r.id)}
+                        onReject={() => reject(r.id)}
+                        onFeature={() => toggleFeature(r)}
+                        onVerify={() => verifyPurchase(r)}
+                        onDelete={() => remove(r.id)}
+                        verifying={verifyingId === r.id}
+                      />
+                    ))}
+                  </div>
+                )}
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-center gap-4 mt-8">
+                    <button
+                      type="button"
+                      disabled={page <= 1 || loading}
+                      onClick={() => setPage((p) => p - 1)}
+                      className="text-sm px-4 py-2 rounded-full border border-border disabled:opacity-40 hover:border-gold transition-colors"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm text-muted-foreground">
+                      Page {page} of {totalPages}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={page >= totalPages || loading}
+                      onClick={() => setPage((p) => p + 1)}
+                      className="text-sm px-4 py-2 rounded-full border border-border disabled:opacity-40 hover:border-gold transition-colors"
+                    >
+                      Next
+                    </button>
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+          </div>
+        </section>
+      </>
+    </AdminGate>
   );
 };
-
-const mediaUrl = (r) => (r.media ? pb.files.getURL(r, r.media) : null);
 
 const ReviewAdminRow = ({
   review: r, editing, editText, onEditText, onStartEdit, onCancelEdit, onSaveEdit,
   onApprove, onReject, onFeature, onVerify, onDelete, verifying,
 }) => {
-  const url = mediaUrl(r);
-  const isVideo = r.media && /\.(mp4|mov|webm)$/i.test(String(r.media));
+  const url = r.media_url || null;
+  const isVideo = url && /\.(mp4|mov|webm)(\?|$)/i.test(url);
   return (
     <div className="bg-white rounded-2xl border border-border shadow-sm p-5 md:p-6">
       <div className="flex flex-col md:flex-row gap-5">

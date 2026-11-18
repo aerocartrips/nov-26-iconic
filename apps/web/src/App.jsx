@@ -8,10 +8,13 @@ import { MessageCircle, Phone } from 'lucide-react';
 import { WHATSAPP_URL, PHONE_TEL } from '@/lib/site';
 import { CartProvider } from '@/context/CartContext';
 import { AuthProvider } from '@/contexts/AuthContext';
+import { AdminAuthProvider } from '@/contexts/AdminAuthContext';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import HomePage from '@/pages/HomePage';
 import ReviewsPage from '@/pages/ReviewsPage';
 import AdminReviewsPage from '@/pages/AdminReviewsPage';
+import AdminLoginPage from '@/pages/AdminLoginPage';
+import AdminOrdersPage from '@/pages/AdminOrdersPage';
 import CollectionsIndexPage from '@/pages/CollectionsIndexPage';
 import CollectionPage from '@/pages/CollectionPage';
 import CategoryProductsPage from '@/pages/CategoryProductsPage';
@@ -27,11 +30,13 @@ import LoginPage from '@/pages/LoginPage';
 import SignupPage from '@/pages/SignupPage';
 import MyAccountPage from '@/pages/MyAccountPage';
 import OrderDetailPage from '@/pages/OrderDetailPage';
+import AdminOrderDetailPage from '@/pages/AdminOrderDetailPage';
 
 
 function App() {
   return (
     <AuthProvider>
+      <AdminAuthProvider>
       <CartProvider>
         <Router>
           <ScrollToTop />
@@ -40,7 +45,10 @@ function App() {
             <Routes>
               <Route path="/" element={<HomePage />} />
               <Route path="/reviews" element={<ReviewsPage />} />
-              <Route path="/admin/reviews" element={<ProtectedRoute><AdminReviewsPage /></ProtectedRoute>} />
+              <Route path="/admin/login" element={<AdminLoginPage />} />
+              <Route path="/admin" element={<AdminOrdersPage />} />
+              <Route path="/admin/orders/:orderId" element={<AdminOrderDetailPage />} />
+              <Route path="/admin/reviews" element={<AdminReviewsPage />} />
               <Route path="/collections" element={<CollectionsIndexPage />} />
               <Route path="/collections/:collectionSlug" element={<CollectionPage />} />
               <Route path="/collections/:collectionSlug/:categorySlug" element={<CategoryProductsPage />} />
@@ -80,6 +88,7 @@ function App() {
           <Toaster />
         </Router>
       </CartProvider>
+      </AdminAuthProvider>
     </AuthProvider>
   );
 }

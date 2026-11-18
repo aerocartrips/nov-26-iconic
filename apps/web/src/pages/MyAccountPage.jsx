@@ -1,21 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Helmet } from 'react-helmet';
 import { Link, useNavigate } from 'react-router-dom';
-import { Loader2, LogOut, Package, User, Lock, ChevronRight, CheckCircle2 } from 'lucide-react';
+import { Loader2, LogOut, Package, User, Lock, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import pb from '@/lib/pocketbaseClient';
-
-const formatINR = (cents) => `\u20b9${((cents || 0) / 100).toFixed(2)}`;
-
-const STATUS_STYLES = {
-  pending: 'bg-amber-100 text-amber-800',
-  paid: 'bg-green-100 text-green-800',
-  processing: 'bg-blue-100 text-blue-800',
-  shipped: 'bg-indigo-100 text-indigo-800',
-  delivered: 'bg-green-200 text-green-900',
-  cancelled: 'bg-red-100 text-red-800',
-  failed: 'bg-red-100 text-red-800',
-};
+import OrderListCard from '@/components/OrderListCard';
 
 const field =
   'w-full bg-[hsl(var(--background))] border border-border rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:border-gold transition-colors';
@@ -137,23 +126,11 @@ const MyAccountPage = () => {
                   ) : (
                     <div className="space-y-4">
                       {orders.map((o) => (
-                        <Link key={o.id} to={`/account/orders/${o.id}`} className="block border border-border rounded-xl p-5 hover:border-gold transition-colors">
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <p className="font-medium text-primary">{o.order_number || o.razorpay_order_id}</p>
-                              <p className="text-xs text-muted-foreground mt-1">
-                                {new Date(o.created).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} · {(o.total_quantity || 0)} pieces
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-3">
-                              <span className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-full font-medium ${STATUS_STYLES[o.status] || 'bg-secondary text-muted-foreground'}`}>
-                                {o.status}
-                              </span>
-                              <span className="font-display text-lg text-primary">{formatINR(o.amount_in_paise)}</span>
-                              <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                            </div>
-                          </div>
-                        </Link>
+                        <OrderListCard
+                          key={o.id}
+                          order={o}
+                          detailPath={`/account/orders/${o.id}`}
+                        />
                       ))}
                     </div>
                   )}
